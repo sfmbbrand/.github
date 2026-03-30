@@ -66,7 +66,6 @@ jobs:
           PR_HEAD: ${{ steps.pr.outputs.head_ref }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GH_REVIEW_TOKEN }}
           claude_args: "--max-turns 30 --allowedTools Read,Glob,Grep,Bash"
           prompt: |
             You are an automated code reviewer for the ErosGuía International platform.
@@ -100,18 +99,45 @@ jobs:
                - Documentation improvements
                - Performance optimizations that aren't critical
 
-            6. **Make your decision and act:**
+            6. **Write your verdict:**
+               - Write `APPROVE` to the file `/tmp/review-verdict.txt` if NO blocking issues found
+               - Write `REQUEST_CHANGES` to the file `/tmp/review-verdict.txt` if blocking issues found
+               - Write a review summary to `/tmp/review-summary.md`
 
-               **If NO blocking issues found:**
+               Use these exact bash commands:
                ```bash
-               gh pr review ${{ steps.pr.outputs.number }} --approve --body "Automated review by Claude: no blocking issues found. Approving and merging."
-               gh pr merge ${{ steps.pr.outputs.number }} --squash --auto
+               echo "APPROVE" > /tmp/review-verdict.txt
+               echo "Automated review: no blocking issues found." > /tmp/review-summary.md
+               ```
+               or:
+               ```bash
+               echo "REQUEST_CHANGES" > /tmp/review-verdict.txt
+               cat > /tmp/review-summary.md << 'SUMMARY'
+               <your detailed summary of blocking issues>
+               SUMMARY
                ```
 
-               **If blocking issues found:**
-               Write a clear summary of ALL blocking issues, then:
-               ```bash
-               gh pr review ${{ steps.pr.outputs.number }} --request-changes --body "<your detailed summary of blocking issues>"
-               ```
+            IMPORTANT: You MUST write both /tmp/review-verdict.txt and /tmp/review-summary.md. Do not skip this step.
 
-            IMPORTANT: You MUST run one of the two `gh pr review` commands above. Do not skip this step.
+      - name: Approve and merge
+        if: steps.pr.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_REVIEW_TOKEN }}
+        run: |
+          VERDICT=$(cat /tmp/review-verdict.txt 2>/dev/null || echo "UNKNOWN")
+          SUMMARY=$(cat /tmp/review-summary.md 2>/dev/null || echo "Automated review completed.")
+          PR_NUM="${{ steps.pr.outputs.number }}"
+
+          echo "Verdict: $VERDICT"
+
+          if [ "$VERDICT" = "APPROVE" ]; then
+            echo "Approving PR #$PR_NUM..."
+            gh pr review "$PR_NUM" --approve --body "$SUMMARY" && echo "Approved!" || echo "::warning::Could not approve (self-review or permission issue)"
+            echo "Merging PR #$PR_NUM..."
+            gh pr merge "$PR_NUM" --squash --auto && echo "Merge initiated!" || echo "::warning::Could not merge"
+          elif [ "$VERDICT" = "REQUEST_CHANGES" ]; then
+            echo "Requesting changes on PR #$PR_NUM..."
+            gh pr review "$PR_NUM" --request-changes --body "$SUMMARY"
+          else
+            echo "::warning::Unknown verdict: $VERDICT — skipping approve/merge"
+          fi
