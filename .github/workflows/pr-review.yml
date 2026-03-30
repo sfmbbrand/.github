@@ -66,6 +66,7 @@ jobs:
           PR_HEAD: ${{ steps.pr.outputs.head_ref }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GH_REVIEW_TOKEN }}
           claude_args: "--max-turns 30 --allowedTools Read,Glob,Grep,Bash"
           prompt: |
             You are an automated code reviewer for the ErosGuía International platform.
