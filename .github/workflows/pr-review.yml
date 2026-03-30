@@ -1,0 +1,116 @@
+name: PR Review (Reusable)
+
+on:
+  workflow_call:
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+      id-token: write
+    steps:
+      - name: Get PR info from workflow_run
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const headBranch = context.payload.workflow_run.head_branch;
+            const headSha = context.payload.workflow_run.head_sha;
+
+            const pulls = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${headBranch}`,
+              state: 'open',
+            });
+
+            if (pulls.data.length === 0) {
+              core.warning(`No open PR found for branch ${headBranch}`);
+              core.setOutput('found', 'false');
+              return;
+            }
+
+            const pr = pulls.data[0];
+            core.setOutput('found', 'true');
+            core.setOutput('number', pr.number);
+            core.setOutput('title', pr.title);
+            core.setOutput('body', pr.body || '');
+            core.setOutput('author', pr.user.login);
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('head_sha', headSha);
+
+      - name: Skip if no PR found
+        if: steps.pr.outputs.found != 'true'
+        run: echo "No open PR found — skipping review."
+
+      - name: Checkout PR code
+        if: steps.pr.outputs.found == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Run Claude review
+        if: steps.pr.outputs.found == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GH_REVIEW_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          PR_AUTHOR: ${{ steps.pr.outputs.author }}
+          PR_BASE: ${{ steps.pr.outputs.base_ref }}
+          PR_HEAD: ${{ steps.pr.outputs.head_ref }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--max-turns 30"
+          prompt: |
+            You are an automated code reviewer for the ErosGuía International platform.
+
+            ## Context
+            - Repository: ${{ github.repository }}
+            - PR #${{ steps.pr.outputs.number }}: ${{ steps.pr.outputs.title }}
+            - Author: ${{ steps.pr.outputs.author }}
+            - Base: ${{ steps.pr.outputs.base_ref }} ← Head: ${{ steps.pr.outputs.head_ref }}
+
+            ## Instructions
+
+            1. Get the full diff:
+               ```
+               gh pr diff ${{ steps.pr.outputs.number }}
+               ```
+
+            2. Read any changed files that need deeper inspection (use Read/Glob/Grep tools).
+
+            3. If the repo has a CLAUDE.md file, read it to understand project conventions.
+
+            4. Review for these **blocking issues** (must request changes):
+               - Security vulnerabilities (SQL injection, XSS, exposed secrets/credentials)
+               - Broken logic or bugs that would cause runtime errors
+               - Data loss risk (missing validation at system boundaries, destructive operations without safeguards)
+               - Missing critical error handling at system boundaries
+
+            5. These are **non-blocking** (leave as comments but do NOT request changes for these alone):
+               - Style preferences, naming suggestions
+               - Minor refactoring opportunities
+               - Documentation improvements
+               - Performance optimizations that aren't critical
+
+            6. **Make your decision and act:**
+
+               **If NO blocking issues found:**
+               ```bash
+               gh pr review ${{ steps.pr.outputs.number }} --approve --body "Automated review by Claude: no blocking issues found. Approving and merging."
+               gh pr merge ${{ steps.pr.outputs.number }} --squash --auto
+               ```
+
+               **If blocking issues found:**
+               Write a clear summary of ALL blocking issues, then:
+               ```bash
+               gh pr review ${{ steps.pr.outputs.number }} --request-changes --body "<your detailed summary of blocking issues>"
+               ```
+
+            IMPORTANT: You MUST run one of the two `gh pr review` commands above. Do not skip this step.
