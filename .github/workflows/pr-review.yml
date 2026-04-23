@@ -12,6 +12,15 @@ jobs:
       actions: read
       id-token: write
     steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Get PR info from workflow_run
         id: pr
         uses: actions/github-script@v8
@@ -58,7 +67,7 @@ jobs:
         if: steps.pr.outputs.found == 'true'
         uses: anthropics/claude-code-action@v1
         env:
-          GH_TOKEN: ${{ secrets.GH_REVIEW_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           PR_TITLE: ${{ steps.pr.outputs.title }}
           PR_AUTHOR: ${{ steps.pr.outputs.author }}
@@ -122,7 +131,7 @@ jobs:
       - name: Approve and merge
         if: steps.pr.outputs.found == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GH_REVIEW_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           VERDICT=$(cat /tmp/review-verdict.txt 2>/dev/null || echo "UNKNOWN")
           SUMMARY=$(cat /tmp/review-summary.md 2>/dev/null || echo "Automated review completed.")
