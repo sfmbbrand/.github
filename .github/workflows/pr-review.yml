@@ -142,9 +142,15 @@ jobs:
 
           if [ "$VERDICT" = "APPROVE" ]; then
             echo "Approving PR #$PR_NUM..."
-            gh pr review "$PR_NUM" --approve --body "$SUMMARY" && echo "Approved!" || echo "::warning::Could not approve (self-review or permission issue)"
-            echo "Merging PR #$PR_NUM..."
-            gh pr merge "$PR_NUM" --squash --auto && echo "Merge initiated!" || echo "::warning::Could not merge"
+            if gh pr review "$PR_NUM" --approve --body "$SUMMARY"; then
+              echo "Approved!"
+              echo "Merging PR #$PR_NUM..."
+              gh pr merge "$PR_NUM" --squash --auto && echo "Merge initiated!" || echo "::warning::Could not enable auto-merge"
+            else
+              echo "::warning::Could not approve — likely self-review (PR opened by the same bot). Falling back to comment."
+              FALLBACK_NOTE=$'\n\n---\n> :warning: **Automated review could not approve this PR.** GitHub blocks self-reviews, so when a PR is opened by the same bot that runs the review workflow, the review is posted as a comment instead. A human reviewer must approve manually to unblock auto-merge.'
+              gh pr comment "$PR_NUM" --body "${SUMMARY}${FALLBACK_NOTE}"
+            fi
           elif [ "$VERDICT" = "REQUEST_CHANGES" ]; then
             echo "Requesting changes on PR #$PR_NUM..."
             gh pr review "$PR_NUM" --request-changes --body "$SUMMARY"
