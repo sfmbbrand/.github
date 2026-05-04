@@ -4,13 +4,25 @@ on:
   workflow_call:
     inputs:
       model:
-        description: "Claude model to use"
+        description: "Claude model for small PRs (below large_pr_threshold)"
         type: string
         default: "claude-haiku-4-5"
+      model_large:
+        description: "Claude model for large PRs (>= large_pr_threshold). Used for deeper analysis."
+        type: string
+        default: "claude-sonnet-4-6"
+      large_pr_threshold:
+        description: "PRs with at least this many changed lines (additions+deletions) get the larger model and higher turn budget."
+        type: number
+        default: 100
       max_turns:
-        description: "Max agent turns"
+        description: "Max agent turns for small PRs"
         type: number
         default: 15
+      max_turns_large:
+        description: "Max agent turns for large PRs"
+        type: number
+        default: 30
       min_lines:
         description: "Skip PRs smaller than this many lines (additions+deletions). Bypassed by `needs-review` label."
         type: number
@@ -78,12 +90,32 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           PR_AUTHOR: ${{ steps.pr.outputs.author }}
           MIN_LINES: ${{ inputs.min_lines }}
+          LARGE_THRESHOLD: ${{ inputs.large_pr_threshold }}
+          MODEL_SMALL: ${{ inputs.model }}
+          MODEL_LARGE: ${{ inputs.model_large }}
+          MAX_TURNS_SMALL: ${{ inputs.max_turns }}
+          MAX_TURNS_LARGE: ${{ inputs.max_turns_large }}
         run: |
           set -euo pipefail
 
           # Always read PR labels first — they can override every other filter.
           STATS=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
                     --json additions,deletions,isDraft,files,labels)
+
+          TOTAL=$(jq -r '.additions + .deletions' <<<"$STATS")
+
+          # Pick model + turn budget based on PR size. Tiny + skip filters below
+          # may still bail out, but these outputs are emitted unconditionally so
+          # the run step can read them without branching.
+          if [ "$TOTAL" -ge "$LARGE_THRESHOLD" ]; then
+            echo "chosen_model=$MODEL_LARGE" >> "$GITHUB_OUTPUT"
+            echo "chosen_max_turns=$MAX_TURNS_LARGE" >> "$GITHUB_OUTPUT"
+            echo "size_tier=large" >> "$GITHUB_OUTPUT"
+          else
+            echo "chosen_model=$MODEL_SMALL" >> "$GITHUB_OUTPUT"
+            echo "chosen_max_turns=$MAX_TURNS_SMALL" >> "$GITHUB_OUTPUT"
+            echo "size_tier=small" >> "$GITHUB_OUTPUT"
+          fi
 
           # `needs-review` label: force review even on bots / tiny / docs-only PRs.
           FORCE=$(jq -r '.labels | map(.name) | index("needs-review") // empty' <<<"$STATS")
@@ -111,7 +143,6 @@ jobs:
           esac
 
           DRAFT=$(jq -r '.isDraft' <<<"$STATS")
-          TOTAL=$(jq -r '.additions + .deletions' <<<"$STATS")
 
           if [ "$DRAFT" = "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -163,7 +194,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "claude-sfmbbrand"
-          claude_args: "--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }} --allowedTools Read,Glob,Grep,Bash"
+          claude_args: "--model ${{ steps.decide.outputs.chosen_model }} --max-turns ${{ steps.decide.outputs.chosen_max_turns }} --allowedTools Read,Glob,Grep,Bash"
           prompt: |
             You are an automated code reviewer for the ErosGuia International platform.
 
@@ -184,33 +215,58 @@ jobs:
 
             3. If the repo has a CLAUDE.md file, read it to understand project conventions.
 
-            4. Review for these **blocking issues** (must request changes):
+            4. Classify findings into two buckets:
+
+               **Blocking** (set verdict to `REQUEST_CHANGES`):
                - Security vulnerabilities (SQL injection, XSS, exposed secrets/credentials)
                - Broken logic or bugs that would cause runtime errors
                - Data loss risk (missing validation at system boundaries, destructive operations without safeguards)
                - Missing critical error handling at system boundaries
 
-            5. These are **non-blocking** (leave as comments but do NOT request changes for these alone):
+               **Non-blocking** (do NOT change the verdict, but MUST appear in the summary):
                - Style preferences, naming suggestions
                - Minor refactoring opportunities
                - Documentation improvements
                - Performance optimizations that aren't critical
+               - Edge cases worth handling defensively
 
-            6. **Write your verdict:**
-               - Write `APPROVE` to the file `/tmp/review-verdict.txt` if NO blocking issues found
-               - Write `REQUEST_CHANGES` to the file `/tmp/review-verdict.txt` if blocking issues found
-               - Write a review summary to `/tmp/review-summary.md`
+            5. **Write your verdict and summary.** Both files are mandatory.
 
-               Use these exact bash commands:
+               When verdict is APPROVE, the summary MUST include:
+               - A short "What this PR does" section (2-4 bullets)
+               - A "Non-blocking observations" section with **2-4 specific suggestions** for improvement
+                 (style, refactor, perf, docs, edge cases) referencing file paths or line numbers when possible.
+                 Only write "None — change is minimal" if the diff is genuinely trivial (≤ 10 changed lines, e.g. a typo fix, version bump, or single-line CSS tweak). For anything bigger, finding zero observations is rare — look harder before defaulting to "None".
+
+               Use these exact bash commands.
+
+               APPROVE example:
                ```bash
                echo "APPROVE" > /tmp/review-verdict.txt
-               echo "Automated review: no blocking issues found." > /tmp/review-summary.md
+               cat > /tmp/review-summary.md << 'SUMMARY'
+               ## Verdict: APPROVE — no blocking issues found
+
+               ### What this PR does
+               - <bullet 1>
+               - <bullet 2>
+
+               ### Non-blocking observations
+               1. **<short title>** — <description, with `path/file.ext:LN` if applicable>
+               2. **<short title>** — <description>
+               SUMMARY
                ```
-               or:
+
+               REQUEST_CHANGES example:
                ```bash
                echo "REQUEST_CHANGES" > /tmp/review-verdict.txt
                cat > /tmp/review-summary.md << 'SUMMARY'
-               <your detailed summary of blocking issues>
+               ## Verdict: REQUEST_CHANGES
+
+               ### Blocking issues
+               1. **<short title>** — <description, file:line>
+
+               ### Non-blocking observations
+               <optional, same format as above>
                SUMMARY
                ```
 
