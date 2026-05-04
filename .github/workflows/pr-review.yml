@@ -81,19 +81,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Skip bot authors (dependabot, renovate, anything ending in [bot])
-          case "$PR_AUTHOR" in
-            dependabot*|renovate*|*\[bot\])
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "reason=bot author ($PR_AUTHOR)" >> "$GITHUB_OUTPUT"
-              exit 0
-              ;;
-          esac
-
+          # Always read PR labels first — they can override every other filter.
           STATS=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
                     --json additions,deletions,isDraft,files,labels)
 
-          # `needs-review` label: force review even on tiny / docs-only PRs
+          # `needs-review` label: force review even on bots / tiny / docs-only PRs.
           FORCE=$(jq -r '.labels | map(.name) | index("needs-review") // empty' <<<"$STATS")
           if [ -n "$FORCE" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -101,13 +93,22 @@ jobs:
             exit 0
           fi
 
-          # `skip-review` label: opt-out
+          # `skip-review` label: explicit opt-out.
           SKIP_LBL=$(jq -r '.labels | map(.name) | index("skip-review") // empty' <<<"$STATS")
           if [ -n "$SKIP_LBL" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "reason=skip-review label" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Skip bot authors (dependabot, renovate, anything ending in [bot]).
+          case "$PR_AUTHOR" in
+            dependabot*|renovate*|*\[bot\])
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "reason=bot author ($PR_AUTHOR)" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
 
           DRAFT=$(jq -r '.isDraft' <<<"$STATS")
           TOTAL=$(jq -r '.additions + .deletions' <<<"$STATS")
