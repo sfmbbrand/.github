@@ -181,6 +181,34 @@ jobs:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
+      # Workaround for anthropics/claude-code-action#1290 — claude-code
+      # 2.1.129 (published 2026-05-05) regressed its install logic so the
+      # binary never lands at ~/.local/bin/claude. claude-code-action@v1
+      # always pulls the latest, so pinning the action wouldn't help; we
+      # pre-install a known-good version (2.1.128) and pass the binary
+      # path to the action so it skips its own broken install. Once the
+      # upstream fix lands (2.1.130+) this step + the
+      # `path_to_claude_code_executable` input below can be removed.
+      - name: Install Node.js 20
+        if: steps.pr.outputs.found == 'true' && steps.decide.outputs.skip != 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Pre-install Claude Code 2.1.128 (workaround for upstream #1290)
+        id: claude-bin
+        if: steps.pr.outputs.found == 'true' && steps.decide.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@2.1.128
+          BIN="$(npm bin -g)/claude"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::claude binary not found at $BIN after npm install"
+            ls -la "$(npm bin -g)" || true
+            exit 1
+          fi
+          echo "path=$BIN" >> "$GITHUB_OUTPUT"
+          "$BIN" --version
+
       - name: Run Claude review
         if: steps.pr.outputs.found == 'true' && steps.decide.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
@@ -193,6 +221,7 @@ jobs:
           PR_HEAD: ${{ steps.pr.outputs.head_ref }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          path_to_claude_code_executable: ${{ steps.claude-bin.outputs.path }}
           allowed_bots: "claude-sfmbbrand"
           claude_args: "--model ${{ steps.decide.outputs.chosen_model }} --max-turns ${{ steps.decide.outputs.chosen_max_turns }} --allowedTools Read,Glob,Grep,Bash"
           prompt: |
