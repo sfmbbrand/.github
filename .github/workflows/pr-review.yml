@@ -189,24 +189,30 @@ jobs:
       # path to the action so it skips its own broken install. Once the
       # upstream fix lands (2.1.130+) this step + the
       # `path_to_claude_code_executable` input below can be removed.
-      - name: Install Node.js 20
-        if: steps.pr.outputs.found == 'true' && steps.decide.outputs.skip != 'true'
-        uses: actions/setup-node@v5
-        with:
-          node-version: '20'
+      #
+      # Uses the runner-image Node (20+ pre-installed on ubuntu-latest)
+      # so we don't pull in `actions/setup-node` — that action's
+      # `package-manager-cache: true` default sniffs the checked-out
+      # repo for pnpm and dies if pnpm isn't on PATH.
       - name: Pre-install Claude Code 2.1.128 (workaround for upstream #1290)
         id: claude-bin
         if: steps.pr.outputs.found == 'true' && steps.decide.outputs.skip != 'true'
         run: |
           set -euo pipefail
+          # Install to the user prefix so we don't need sudo and so the
+          # binary lands in a stable, predictable location regardless of
+          # the runner's global npm prefix.
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
           npm install -g @anthropic-ai/claude-code@2.1.128
-          BIN="$(npm bin -g)/claude"
+          BIN="$HOME/.npm-global/bin/claude"
           if [ ! -x "$BIN" ]; then
             echo "::error::claude binary not found at $BIN after npm install"
-            ls -la "$(npm bin -g)" || true
+            ls -la "$HOME/.npm-global/bin/" || true
             exit 1
           fi
           echo "path=$BIN" >> "$GITHUB_OUTPUT"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
           "$BIN" --version
 
       - name: Run Claude review
