@@ -26,7 +26,7 @@ on:
       min_lines:
         description: "Skip PRs smaller than this many lines (additions+deletions). Bypassed by `needs-review` label."
         type: number
-        default: 15
+        default: 20
 
 jobs:
   review:
