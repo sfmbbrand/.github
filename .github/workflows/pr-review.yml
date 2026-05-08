@@ -14,7 +14,7 @@ on:
       large_pr_threshold:
         description: "PRs with at least this many changed lines (additions+deletions) get the larger model and higher turn budget."
         type: number
-        default: 20
+        default: 100
       max_turns:
         description: "Max agent turns for small PRs"
         type: number
