@@ -28,7 +28,7 @@ on:
         type: number
         default: 100
       runner:
-        description: "Runner spec as JSON. Default keeps GitHub-hosted ubuntu-latest; pass a JSON array (e.g. '["self-hosted", "my-label"]') to opt into a self-hosted runner."
+        description: 'Runner spec as JSON. Default keeps GitHub-hosted ubuntu-latest; pass a JSON array (e.g. ''["self-hosted", "my-label"]'') to opt into a self-hosted runner.'
         type: string
         default: '"ubuntu-latest"'
 
