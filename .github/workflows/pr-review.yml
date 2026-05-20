@@ -354,7 +354,17 @@ jobs:
             if gh pr review "$PR_NUM" --approve --body "$SUMMARY"; then
               echo "Approved!"
               echo "Merging PR #$PR_NUM..."
-              gh pr merge "$PR_NUM" --squash --auto && echo "Merge initiated!" || echo "::warning::Could not enable auto-merge"
+              # `gh pr merge --auto` exits non-zero when auto-merge is already
+              # enabled (e.g. when the PR author enabled it manually). That's
+              # not a real failure — only warn if the failure is something else.
+              MERGE_OUTPUT=$(gh pr merge "$PR_NUM" --squash --auto 2>&1) && MERGE_RC=$? || MERGE_RC=$?
+              if [ "$MERGE_RC" -eq 0 ]; then
+                echo "Merge initiated!"
+              elif echo "$MERGE_OUTPUT" | grep -qiE 'auto.?merge.+(already|enabled)'; then
+                echo "Auto-merge already enabled — nothing to do."
+              else
+                echo "::warning::Could not enable auto-merge: $MERGE_OUTPUT"
+              fi
             else
               echo "::warning::Could not approve — likely self-review (PR opened by the same bot). Falling back to comment."
               FALLBACK_NOTE=$'\n\n---\n> :warning: **Automated review could not approve this PR.** GitHub blocks self-reviews, so when a PR is opened by the same bot that runs the review workflow, the review is posted as a comment instead. A human reviewer must approve manually to unblock auto-merge.'
