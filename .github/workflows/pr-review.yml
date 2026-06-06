@@ -40,6 +40,15 @@ jobs:
       pull-requests: write
       actions: read
       id-token: write
+    env:
+      # Per-run handoff dir for the review verdict/summary. MUST live under
+      # runner.temp (per-job, auto-cleaned) and be namespaced by run id —
+      # a fixed /tmp path is shared by EVERY repo's review job on the same
+      # self-hosted host, so a leftover file from another repo's run (worst
+      # case root-owned and unoverwritable) gets read back and posted as THIS
+      # PR's review. That cross-contamination put a safety-guides review on
+      # unrelated PRs across all repos (2026-06).
+      REVIEW_DIR: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -308,8 +317,9 @@ jobs:
 
                APPROVE example:
                ```bash
-               echo "APPROVE" > /tmp/review-verdict.txt
-               cat > /tmp/review-summary.md << 'SUMMARY'
+               mkdir -p "$REVIEW_DIR"
+               echo "APPROVE" > "$REVIEW_DIR/review-verdict.txt"
+               cat > "$REVIEW_DIR/review-summary.md" << 'SUMMARY'
                ## Verdict: APPROVE — no blocking issues found
 
                ### What this PR does
@@ -324,8 +334,9 @@ jobs:
 
                REQUEST_CHANGES example:
                ```bash
-               echo "REQUEST_CHANGES" > /tmp/review-verdict.txt
-               cat > /tmp/review-summary.md << 'SUMMARY'
+               mkdir -p "$REVIEW_DIR"
+               echo "REQUEST_CHANGES" > "$REVIEW_DIR/review-verdict.txt"
+               cat > "$REVIEW_DIR/review-summary.md" << 'SUMMARY'
                ## Verdict: REQUEST_CHANGES
 
                ### Blocking issues
@@ -336,7 +347,7 @@ jobs:
                SUMMARY
                ```
 
-            IMPORTANT: You MUST write both /tmp/review-verdict.txt and /tmp/review-summary.md. Do not skip this step.
+            IMPORTANT: First run `mkdir -p "$REVIEW_DIR"`, then write both "$REVIEW_DIR/review-verdict.txt" and "$REVIEW_DIR/review-summary.md" (the $REVIEW_DIR env var is already exported for you). Do not skip this step and do not use a hardcoded /tmp path.
 
       - name: Approve and merge
         if: steps.pr.outputs.found == 'true' && steps.decide.outputs.skip != 'true'
@@ -344,8 +355,21 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUM: ${{ steps.pr.outputs.number }}
         run: |
-          VERDICT=$(cat /tmp/review-verdict.txt 2>/dev/null || echo "UNKNOWN")
-          SUMMARY=$(cat /tmp/review-summary.md 2>/dev/null || echo "Automated review completed.")
+          VERDICT_FILE="$REVIEW_DIR/review-verdict.txt"
+          SUMMARY_FILE="$REVIEW_DIR/review-summary.md"
+
+          # Fail loud if the review step produced no verdict/summary THIS run.
+          # These used to be fixed /tmp paths read with `|| echo` fallbacks, so a
+          # stale leftover from another repo's run on a shared self-hosted host
+          # was silently posted as this PR's review. Namespacing under
+          # $REVIEW_DIR plus this guard makes a cross-contaminated or empty
+          # review impossible (abort instead of posting a default/stale body).
+          if [ ! -s "$VERDICT_FILE" ] || [ ! -s "$SUMMARY_FILE" ]; then
+            echo "::error::Review output missing under $REVIEW_DIR — the review step produced no verdict/summary this run. Aborting instead of posting a default or stale review."
+            exit 1
+          fi
+          VERDICT=$(cat "$VERDICT_FILE")
+          SUMMARY=$(cat "$SUMMARY_FILE")
 
           echo "Verdict: $VERDICT"
 
