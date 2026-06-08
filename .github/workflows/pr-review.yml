@@ -40,16 +40,22 @@ jobs:
       pull-requests: write
       actions: read
       id-token: write
-    env:
-      # Per-run handoff dir for the review verdict/summary. MUST live under
-      # runner.temp (per-job, auto-cleaned) and be namespaced by run id —
-      # a fixed /tmp path is shared by EVERY repo's review job on the same
-      # self-hosted host, so a leftover file from another repo's run (worst
-      # case root-owned and unoverwritable) gets read back and posted as THIS
-      # PR's review. That cross-contamination put a safety-guides review on
-      # unrelated PRs across all repos (2026-06).
-      REVIEW_DIR: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Set per-run review handoff dir
+        # Per-run handoff dir for the review verdict/summary. MUST live under
+        # RUNNER_TEMP (per-job, auto-cleaned) and be namespaced by run id —
+        # a fixed /tmp path is shared by EVERY repo's review job on the same
+        # self-hosted host, so a leftover file from another repo's run (worst
+        # case root-owned and unoverwritable) gets read back and posted as THIS
+        # PR's review. That cross-contamination put a safety-guides review on
+        # unrelated PRs across all repos (2026-06).
+        #
+        # This is set in a step (not job-level `env:`) because the `runner.*`
+        # context is unavailable in job-level `env` — using `${{ runner.temp }}`
+        # there fails to compile the (reusable) workflow → startup_failure with
+        # no jobs and "workflow file may be broken" (broke all 9 repos 2026-06).
+        run: echo "REVIEW_DIR=$RUNNER_TEMP/claude-review-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
