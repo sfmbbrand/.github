@@ -34,6 +34,10 @@ on:
 
 jobs:
   review:
+    # Skip promotion PRs (staging -> main): every commit in them was already
+    # reviewed by its own PR into staging, so re-reviewing the whole train is
+    # duplicated noise. Repos without a staging branch are unaffected.
+    if: github.event.workflow_run.head_branch != 'staging'
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: read
