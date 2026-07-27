@@ -22,7 +22,7 @@ on:
       max_turns_large:
         description: "Max agent turns for large PRs"
         type: number
-        default: 25
+        default: 60
       min_lines:
         description: "Skip PRs smaller than this many lines (additions+deletions). Bypassed by `needs-review` label."
         type: number
