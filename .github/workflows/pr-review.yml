@@ -10,7 +10,7 @@ on:
       model_large:
         description: "Claude model for large PRs (>= large_pr_threshold). Used for deeper analysis."
         type: string
-        default: "claude-sonnet-4-6"
+        default: "claude-sonnet-5"
       large_pr_threshold:
         description: "PRs with at least this many changed lines (additions+deletions) get the larger model and higher turn budget."
         type: number
