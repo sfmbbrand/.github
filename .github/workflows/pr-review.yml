@@ -32,6 +32,14 @@ on:
         type: string
         default: '"ubuntu-latest"'
 
+# One review in flight per PR branch. Pushing again while a review is running
+# cancels it: that review is already reading a diff nobody will merge, and every
+# cancelled run is a model invocation not paid for. Keyed by head_branch because
+# workflow_run carries no PR number.
+concurrency:
+  group: pr-review-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
 jobs:
   review:
     # Skip promotion PRs (staging -> main): every commit in them was already
@@ -91,6 +99,29 @@ jobs:
             }
 
             const pr = pulls.data[0];
+
+            // The branch moved while CI was queued: this run would review a
+            // diff that is already superseded, and the newer push brings its
+            // own CI + review. Bail before spending a model call.
+            if (pr.head.sha !== headSha) {
+              core.notice(`Stale run: CI ran on ${headSha.slice(0, 8)} but the PR tip is ${pr.head.sha.slice(0, 8)} — a newer run will review it.`);
+              core.setOutput('found', 'false');
+              return;
+            }
+
+            // What this App already reviewed, so a re-push costs an incremental
+            // review instead of a second full read of the whole diff. Reviews
+            // carry the commit they were submitted against.
+            const reviews = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+            const mine = reviews.data.filter(r =>
+              r.user && r.user.login.endsWith('[bot]') && r.commit_id &&
+              (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED'));
+            const last = mine.length ? mine[mine.length - 1] : null;
+
             core.setOutput('found', 'true');
             core.setOutput('number', pr.number);
             core.setOutput('title', pr.title);
@@ -99,6 +130,8 @@ jobs:
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('head_ref', pr.head.ref);
             core.setOutput('head_sha', headSha);
+            core.setOutput('last_reviewed_sha', last && last.commit_id !== headSha ? last.commit_id : '');
+            core.setOutput('last_verdict', last ? last.state : '');
 
       - name: Skip if no PR found
         if: steps.pr.outputs.found != 'true'
@@ -118,6 +151,9 @@ jobs:
           MODEL_LARGE: ${{ inputs.model_large }}
           MAX_TURNS_SMALL: ${{ inputs.max_turns }}
           MAX_TURNS_LARGE: ${{ inputs.max_turns_large }}
+          LAST_REVIEWED_SHA: ${{ steps.pr.outputs.last_reviewed_sha }}
+          LAST_VERDICT: ${{ steps.pr.outputs.last_verdict }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
 
@@ -125,7 +161,28 @@ jobs:
           STATS=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
                     --json additions,deletions,isDraft,files,labels)
 
-          TOTAL=$(jq -r '.additions + .deletions' <<<"$STATS")
+          FULL_TOTAL=$(jq -r '.additions + .deletions' <<<"$STATS")
+          TOTAL=$FULL_TOTAL
+          RANGE=""
+
+          # A PR this App already reviewed only needs the part that changed
+          # since. Re-reading the whole diff on every push is what made one
+          # 120-file PR cost three full Sonnet reviews (2026-09-21). Size the
+          # model choice and the skip threshold on the increment, and tell the
+          # prompt to read only that range.
+          if [ -n "${LAST_REVIEWED_SHA:-}" ]; then
+            if INCR=$(gh api "repos/$REPO/compare/$LAST_REVIEWED_SHA...$HEAD_SHA" \
+                        --jq '[.files[]?.changes] | add // 0' 2>/dev/null); then
+              TOTAL=$INCR
+              RANGE="$LAST_REVIEWED_SHA...$HEAD_SHA"
+              echo "::notice::Incremental review — $TOTAL changed lines since ${LAST_REVIEWED_SHA:0:8} (full PR is $FULL_TOTAL)."
+            else
+              # Force-push or rebase: the reviewed commit is gone from the
+              # branch, so there is no honest increment. Fall back to the
+              # whole diff rather than reviewing a range that does not exist.
+              echo "::notice::Previously reviewed commit ${LAST_REVIEWED_SHA:0:8} is unreachable (force-push?) — reviewing the full diff."
+            fi
+          fi
 
           # Pick model + turn budget based on PR size. Tiny + skip filters below
           # may still bail out, but these outputs are emitted unconditionally so
@@ -139,6 +196,8 @@ jobs:
             echo "chosen_max_turns=$MAX_TURNS_SMALL" >> "$GITHUB_OUTPUT"
             echo "size_tier=small" >> "$GITHUB_OUTPUT"
           fi
+
+          echo "review_range=$RANGE" >> "$GITHUB_OUTPUT"
 
           # `needs-review` label: force review even on bots / tiny / docs-only PRs.
           FORCE=$(jq -r '.labels | map(.name) | index("needs-review") // empty' <<<"$STATS")
@@ -173,15 +232,28 @@ jobs:
             exit 0
           fi
 
-          if [ "$TOTAL" -lt "$MIN_LINES" ]; then
+          # A tiny increment after a REQUEST_CHANGES is exactly the push that
+          # claims to fix the blocking issue. Auto-approving it unread would
+          # rubber-stamp the thing the review blocked on, so it always gets
+          # looked at, however small.
+          if [ "$TOTAL" -lt "$MIN_LINES" ] && [ "${LAST_VERDICT:-}" = "CHANGES_REQUESTED" ]; then
+            echo "::notice::Increment is $TOTAL lines but the last verdict was REQUEST_CHANGES — reviewing it anyway."
+          elif [ "$TOTAL" -lt "$MIN_LINES" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "reason=tiny PR ($TOTAL lines, threshold $MIN_LINES)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Skip if every changed file is docs/lock/config-only
-          NON_TRIVIAL=$(jq -r '.files | map(.path) |
-            map(select(test("\\.(md|lock|json|yml|yaml|txt)$") | not)) | length' <<<"$STATS")
+          # Skip if every changed file is docs/lock/config-only. Judged on the
+          # same set of files the review will actually read — the increment
+          # when there is one, otherwise the whole PR.
+          if [ -n "$RANGE" ]; then
+            NON_TRIVIAL=$(gh api "repos/$REPO/compare/$RANGE" --jq \
+              '[.files[]?.filename | select(test("\\.(md|lock|json|yml|yaml|txt)$") | not)] | length')
+          else
+            NON_TRIVIAL=$(jq -r '.files | map(.path) |
+              map(select(test("\\.(md|lock|json|yml|yaml|txt)$") | not)) | length' <<<"$STATS")
+          fi
           if [ "$NON_TRIVIAL" -eq 0 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "reason=docs/lock/config only" >> "$GITHUB_OUTPUT"
@@ -275,6 +347,7 @@ jobs:
           PR_AUTHOR: ${{ steps.pr.outputs.author }}
           PR_BASE: ${{ steps.pr.outputs.base_ref }}
           PR_HEAD: ${{ steps.pr.outputs.head_ref }}
+          REVIEW_RANGE: ${{ steps.decide.outputs.review_range }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           path_to_claude_code_executable: ${{ steps.claude-bin.outputs.path }}
@@ -291,10 +364,30 @@ jobs:
 
             ## Instructions
 
-            1. Get the full diff:
+            1. Get the diff you are reviewing.
+
+               `REVIEW_RANGE` is exported. **If it is non-empty, this PR was already
+               reviewed by you and only the new commits need reviewing** — read that
+               range and nothing else:
+
+               ```
+               git diff "$REVIEW_RANGE"
+               ```
+
+               Do not re-raise findings about code outside that range; it was covered
+               by the earlier review and repeating it wastes the author's time. If the
+               range touches something whose correctness depends on code outside it,
+               read that code for context (step 2) but judge only the new changes.
+
+               If `REVIEW_RANGE` is empty, this is a first review — read the whole diff:
+
                ```
                gh pr diff ${{ steps.pr.outputs.number }}
                ```
+
+               If the `git diff` fails (the older commit can be missing after a
+               force-push), fall back to the full `gh pr diff` and review everything.
+               Reviewing too much is a waste; reviewing nothing is a hole.
 
             2. Read any changed files that need deeper inspection (use Read/Glob/Grep tools).
 
@@ -331,6 +424,11 @@ jobs:
                echo "APPROVE" > "$REVIEW_DIR/review-verdict.txt"
                cat > "$REVIEW_DIR/review-summary.md" << 'SUMMARY'
                ## Verdict: APPROVE — no blocking issues found
+
+               <!-- When REVIEW_RANGE is non-empty, open with one line saying
+                    which commits this review covers, e.g.
+                    "Incremental review of the commits since <sha>; earlier
+                    commits were covered by the previous review." -->
 
                ### What this PR does
                - <bullet 1>
