@@ -6,11 +6,11 @@ on:
       model:
         description: "Claude model for small PRs (below large_pr_threshold)"
         type: string
-        default: "claude-haiku-4-5"
+        default: "claude-haiku-5-5"
       model_large:
         description: "Claude model for large PRs (>= large_pr_threshold). Used for deeper analysis."
         type: string
-        default: "claude-sonnet-5"
+        default: "claude-sonnet-5-5"
       large_pr_threshold:
         description: "PRs with at least this many changed lines (additions+deletions) get the larger model and higher turn budget."
         type: number
@@ -307,16 +307,22 @@ jobs:
       # 2.1.129 (published 2026-05-05) regressed its install logic so the
       # binary never lands at ~/.local/bin/claude. claude-code-action@v1
       # always pulls the latest, so pinning the action wouldn't help; we
-      # pre-install a known-good version (2.1.128) and pass the binary
-      # path to the action so it skips its own broken install. Once the
-      # upstream fix lands (2.1.130+) this step + the
-      # `path_to_claude_code_executable` input below can be removed.
+      # pre-install a known-good version and pass the binary path to the
+      # action so it skips its own broken install. Once the upstream fix
+      # lands this step + the `path_to_claude_code_executable` input below
+      # can be removed.
+      #
+      # Keep the pinned version equal to the CLAUDE_CODE_VERSION that
+      # claude-code-action@v1 installs itself (base-action/action.yml):
+      # the action warns that an older CLI may break when it starts using
+      # newer Claude Code features, and @v1 keeps moving. 2.1.312 matches
+      # the action as of 2026-10-29; it was 2.1.128 until then.
       #
       # Uses the runner-image Node (20+ pre-installed on ubuntu-latest)
       # so we don't pull in `actions/setup-node` — that action's
       # `package-manager-cache: true` default sniffs the checked-out
       # repo for pnpm and dies if pnpm isn't on PATH.
-      - name: Pre-install Claude Code 2.1.128 (workaround for upstream #1290)
+      - name: Pre-install Claude Code 2.1.312 (workaround for upstream #1290)
         id: claude-bin
         if: steps.pr.outputs.found == 'true' && steps.decide.outputs.skip != 'true'
         run: |
@@ -326,7 +332,7 @@ jobs:
           # the runner's global npm prefix.
           mkdir -p "$HOME/.npm-global"
           npm config set prefix "$HOME/.npm-global"
-          npm install -g @anthropic-ai/claude-code@2.1.128
+          npm install -g @anthropic-ai/claude-code@2.1.312
           BIN="$HOME/.npm-global/bin/claude"
           if [ ! -x "$BIN" ]; then
             echo "::error::claude binary not found at $BIN after npm install"
