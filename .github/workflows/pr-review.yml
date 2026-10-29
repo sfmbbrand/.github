@@ -36,9 +36,10 @@ on:
 # cancels it: that review is already reading a diff nobody will merge, and every
 # cancelled run is a model invocation not paid for. Callers trigger this either
 # on pull_request (in parallel with CI) or on workflow_run (after CI); the
-# latter carries no PR number, so it is keyed by head branch instead.
+# latter carries no PR number, so it is keyed by head repo and branch instead.
+# The event name keeps the two key spaces apart (a branch called "12" is not PR #12).
 concurrency:
-  group: pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.head_branch }}
+  group: pr-review-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || format('{0}:{1}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) }}
   cancel-in-progress: true
 
 jobs:
