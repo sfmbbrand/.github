@@ -48,9 +48,11 @@ jobs:
     # reviewed by its own PR into staging, so re-reviewing the whole train is
     # duplicated noise. Repos without a staging branch are unaffected.
     # Drafts are skipped before a runner is taken; ready_for_review brings them back.
+    # PRs from forks never reach the (possibly self-hosted) runner or the secrets.
     if: >-
       (github.event.pull_request.head.ref || github.event.workflow_run.head_branch) != 'staging' &&
-      github.event.pull_request.draft != true
+      github.event.pull_request.draft != true &&
+      (!github.event.pull_request || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: read
