@@ -32,12 +32,14 @@ on:
         type: string
         default: '"ubuntu-latest"'
 
-# One review in flight per PR branch. Pushing again while a review is running
+# One review in flight per PR. Pushing again while a review is running
 # cancels it: that review is already reading a diff nobody will merge, and every
-# cancelled run is a model invocation not paid for. Keyed by head_branch because
-# workflow_run carries no PR number.
+# cancelled run is a model invocation not paid for. Callers trigger this either
+# on pull_request (in parallel with CI) or on workflow_run (after CI); the
+# latter carries no PR number, so it is keyed by head repo and branch instead.
+# The event name keeps the two key spaces apart (a branch called "12" is not PR #12).
 concurrency:
-  group: pr-review-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  group: pr-review-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || format('{0}:{1}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) }}
   cancel-in-progress: true
 
 jobs:
@@ -45,7 +47,12 @@ jobs:
     # Skip promotion PRs (staging -> main): every commit in them was already
     # reviewed by its own PR into staging, so re-reviewing the whole train is
     # duplicated noise. Repos without a staging branch are unaffected.
-    if: github.event.workflow_run.head_branch != 'staging'
+    # Drafts are skipped before a runner is taken; ready_for_review brings them back.
+    # PRs from forks never reach the (possibly self-hosted) runner or the secrets.
+    if: >-
+      (github.event.pull_request.head.ref || github.event.workflow_run.head_branch) != 'staging' &&
+      github.event.pull_request.draft != true &&
+      (!github.event.pull_request || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: read
@@ -77,34 +84,54 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Get PR info from workflow_run
+      - name: Get PR info
         id: pr
         uses: actions/github-script@v8
         with:
           script: |
-            const headBranch = context.payload.workflow_run.head_branch;
-            const headSha = context.payload.workflow_run.head_sha;
+            let pr;
+            let headSha;
 
-            const pulls = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              head: `${context.repo.owner}:${headBranch}`,
-              state: 'open',
-            });
+            if (context.payload.pull_request) {
+              // Re-read the PR rather than trusting the event payload, so the
+              // stale check below compares against the current tip.
+              headSha = context.payload.pull_request.head.sha;
+              const { data } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+              });
+              if (data.state !== 'open') {
+                core.notice(`PR #${data.number} is ${data.state} — nothing to review.`);
+                core.setOutput('found', 'false');
+                return;
+              }
+              pr = data;
+            } else {
+              const headBranch = context.payload.workflow_run.head_branch;
+              headSha = context.payload.workflow_run.head_sha;
 
-            if (pulls.data.length === 0) {
-              core.warning(`No open PR found for branch ${headBranch}`);
-              core.setOutput('found', 'false');
-              return;
+              const pulls = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: `${context.repo.owner}:${headBranch}`,
+                state: 'open',
+              });
+
+              if (pulls.data.length === 0) {
+                core.warning(`No open PR found for branch ${headBranch}`);
+                core.setOutput('found', 'false');
+                return;
+              }
+
+              pr = pulls.data[0];
             }
 
-            const pr = pulls.data[0];
-
-            // The branch moved while CI was queued: this run would review a
+            // The branch moved since this run was triggered: it would review a
             // diff that is already superseded, and the newer push brings its
-            // own CI + review. Bail before spending a model call.
+            // own review. Bail before spending a model call.
             if (pr.head.sha !== headSha) {
-              core.notice(`Stale run: CI ran on ${headSha.slice(0, 8)} but the PR tip is ${pr.head.sha.slice(0, 8)} — a newer run will review it.`);
+              core.notice(`Stale run: triggered for ${headSha.slice(0, 8)} but the PR tip is ${pr.head.sha.slice(0, 8)} — a newer run will review it.`);
               core.setOutput('found', 'false');
               return;
             }
